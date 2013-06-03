@@ -359,10 +359,10 @@ main (int argc, char **argv)
             }
 
             libwebsocket_context_destroy(context);
+        }
 
-            if (msg) {
-                free(msg);
-            }
+        if (msg) {
+            free(msg);
         }
 
         if (filename) {
