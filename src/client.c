@@ -1,20 +1,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <libgen.h>
-#include <getopt.h>
-#include <signal.h>
+
+#ifndef WIN32
 #include <limits.h>
+#include <signal.h>
 #include <sys/types.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <libgen.h>
 #include <regex.h>
+#else
+#include "win32/getopt.h"
+#endif
 
 #include <libwebsockets.h>
 #include <jansson.h>
 
-#if HAVE_INOTIFYTOOLS
-#include <inotifytools/inotifytools.h>
-#include <inotifytools/inotify.h>
+#ifdef HAVE_WATCH
+#include "watcher.h"
+#endif
+
+#define HAVE_SSL
+#ifndef WIN32
+#define HAVE_SUFFIX
 #endif
 
 static int interrupted = 0;
@@ -25,18 +34,24 @@ static unsigned char *str = NULL;
 #define DEFAULT_ADDRESS "localhost"
 #define DEFAULT_PORT 35729
 
-#define ERR(...) fprintf(stderr, "ERR: "__VA_ARGS__)
-#define DEBUG(l, ...) if (!quiet && verbose >= l) { printf(__VA_ARGS__); }
-#define NOTICE(l, ...) if (!quiet && verbose >= l) { lwsl_notice(__VA_ARGS__); }
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#define _ERR(...) fprintf(stderr, "ERR: "__VA_ARGS__)
+#define _debug(l, ...) if (!quiet && verbose >= l) { printf(__VA_ARGS__); }
+#define _NOTICE(l, ...) if (!quiet && verbose >= l) { lwsl_notice(__VA_ARGS__); }
 
 static int
-callback_default(struct libwebsocket_context *context, struct libwebsocket *wsi,
-                 enum libwebsocket_callback_reasons reason, void *user,
-                 void *in, size_t len)
+callback_livereload(struct libwebsocket_context *context,
+                    struct libwebsocket *wsi,
+                    enum libwebsocket_callback_reasons reason, void *user,
+                    void *in, size_t len)
 {
     return 0;
 }
 
+#ifndef WIN32
 static void
 signal_handler(int sig)
 {
@@ -54,34 +69,63 @@ signals(void)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 }
+#else
+static BOOL WINAPI
+signal_handler(DWORD type)
+{
+    interrupted = 1;
+    return TRUE;
+}
+
+static void
+signals(void)
+{
+    SetConsoleCtrlHandler(signal_handler, TRUE);
+}
+#endif
 
 static void
 usage(char *arg, char *message)
 {
+#ifndef WIN32
     char *command = basename(arg);
-
-    printf("Usage: %s [-a ADDRESS] [-p PORT]"
-#if HAVE_INOTIFYTOOLS
-           " [-w]"
+#else
+    char *command = arg;
 #endif
-           " [-h HOST] [-s SUFFIX]\n", command);
-    printf("%*s        [-c SSL_CERT_PATH -k SSL_KEY_PATH] PATH\n\n",
-           (int)strlen(command), "");
+
+    printf("Usage: %s [-a ADDRESS] [-p PORT] [-H HOST]"
+#ifdef HAVE_WATCH
+           " [-W]"
+#endif
+#ifdef HAVE_SUFFIX
+           " [-s SUFFIX]"
+#endif
+           "\n", command);
+    printf("%*s       ", (int)strlen(command), "");
+
+#ifdef HAVE_SSL
+    printf(" [-c SSL_CERT_PATH -k SSL_KEY_PATH]");
+#endif
+    printf(" PATH\n\n");
 
     printf("  -a, --addres=ADDRESS connection server address [DEFAULT: %s]\n",
            DEFAULT_ADDRESS);
     printf("  -p, --port=PORT      connection server port [DEFAULT: %d]\n",
            DEFAULT_PORT);
-#if HAVE_INOTIFYTOOLS
-    printf("  -w, --watch          watch change file of PATH\n");
+    printf("  -H, --host=HOST      append web host name\n");
+#ifdef HAVE_WATCH
+    printf("  -W, --watch          watch change file of PATH\n");
 #endif
-    printf("  -h, --host=HOST      append web host name\n");
+#ifdef HAVE_SUFFIX
     printf("  -s, --suffix=SUFFIX  remove a trailing SUFFIX\n");
+#endif
+#ifdef HAVE_SSL
     printf("  -c, --certpath=FILE  ssl certificate file path\n");
     printf("  -k, --keypath=FILE   ssl private key file path\n");
+#endif
     printf("  -v, --verbose        verbosity message\n");
     printf("  -q, --quiet          quiet message\n");
-#if HAVE_INOTIFYTOOLS
+#ifdef HAVE_WATCH
     printf("  PATH                 send or watch path name\n");
 #else
     printf("  PATH                 send path name\n");
@@ -93,15 +137,15 @@ usage(char *arg, char *message)
 }
 
 static struct libwebsocket_protocols protocols[] = {
-    {
-        "default",        /* name */
-        callback_default, /* callback */
-        0,                /* per_session_data_size */
-        0,                /* max frame size / rx buffer */
-        NULL,             /* owning_server */
-        0                 /* protocol_index */
-    },
+    { "livereload", callback_livereload, 0, 0, NULL, 0 },
     { NULL, NULL, 0, 0, NULL, 0 } /* End of list */
+    /*
+     - name
+     - callback
+     - per_session_data_size, max frame size / rx buffer
+     - owning_server
+     - protocol_index
+    */
 };
 
 int
@@ -122,8 +166,8 @@ main (int argc, char **argv)
     char *web = NULL, *suffix = NULL;
     char path[PATH_MAX];
     char *str = NULL;
-#if HAVE_INOTIFYTOOLS
-    int inotify = 0;
+#ifdef HAVE_WATCH
+    watcher_t *watcher;
 #endif
 
     struct libwebsocket_context *context;
@@ -134,11 +178,11 @@ main (int argc, char **argv)
     const struct option long_options[] = {
         { "address", 1, NULL, 'a' },
         { "port", 1, NULL, 'p' },
-#if HAVE_INOTIFYTOOLS
-        { "watch", 0, NULL, 'w' },
+#ifdef HAVE_WATCH
+        { "watch", 0, NULL, 'W' },
 #endif
         { "suffix", 1, NULL, 's' },
-        { "host", 1, NULL, 'h' },
+        { "host", 1, NULL, 'H' },
         { "certpath", 1, NULL, 'c' },
         { "keypath", 1, NULL, 'k' },
         { "verbose", 1, NULL, 'v' },
@@ -147,7 +191,7 @@ main (int argc, char **argv)
         { NULL, 0, NULL, 0 }
     };
 
-    while ((opt = getopt_long(argc, argv, "a:p:ws:h:c:k:vs",
+    while ((opt = getopt_long(argc, argv, "a:p:Ws:H:c:k:vs",
                               long_options, NULL)) != -1) {
         switch (opt) {
             case 'a':
@@ -156,13 +200,13 @@ main (int argc, char **argv)
             case 'p':
                 port = atoi(optarg);
                 break;
-            case 'w':
+            case 'W':
                 watch = 1;
                 break;
             case 's':
                 suffix = optarg;
                 break;
-            case 'h':
+            case 'H':
                 web = optarg;
                 break;
             case 'c':
@@ -203,9 +247,15 @@ main (int argc, char **argv)
         return -1;
     }
 
+#ifdef HAVE_SSL
     if (cert_path || key_path) {
         use_ssl = 1;
     }
+#else
+    use_ssl = 0;
+    cert_path = NULL;
+    key_path = NULL;
+#endif
 
     if (quiet) {
         lws_set_log_level(-1, NULL);
@@ -215,25 +265,22 @@ main (int argc, char **argv)
         lws_set_log_level(LLL_NOTICE, NULL);
     }
 
-#if HAVE_INOTIFYTOOLS
+#ifdef HAVE_WATCH
     if (watch) {
-        inotify = inotifytools_initialize();
-        if (!inotify) {
-            ERR("%s\n", strerror(inotifytools_error()));
+        watcher = watcher_init();
+        if (!watcher) {
+            _ERR("%s\n", watcher_error());
             return -1;
         }
-
-        inotifytools_set_printf_timefmt("%H:%M:%S");
-
-        //if (!inotifytools_watch_recursively(arg, IN_ALL_EVENTS)) {
-        if (!inotifytools_watch_recursively(arg, IN_CLOSE_WRITE)) {
-            ERR("%s\n", strerror(inotifytools_error()));
+        if (watcher_recursively(watcher, arg) != 0) {
+            _ERR("%s\n", watcher_error());
+            watcher_destroy(watcher);
             return -1;
         }
 
         signals();
 
-        DEBUG(1, "Starting watch [%s] ...\n", arg);
+        _debug(1, "Starting watching [%s] ...\n", arg);
     } else {
         interrupted = 1;
     }
@@ -244,34 +291,22 @@ main (int argc, char **argv)
     do {
         char *filename = NULL;
 
-#if HAVE_INOTIFYTOOLS
+#ifdef HAVE_WATCH
         if (watch) {
-            char *name = NULL;
-            size_t len;
-            struct inotify_event *event = inotifytools_next_event(-1);
-            if (!event || interrupted) {
+            if (watcher_next_event(watcher) != 0 || interrupted) {
                 break;
             }
 
-            if (event->mask != IN_CLOSE_WRITE) {
+            if (watcher_in_event(watcher) != 0) {
                 continue;
             }
 
-            name = inotifytools_filename_from_wd(event->wd);
-            if (!name) {
-                continue;
-            }
-
-            len = strlen(name) + strlen(event->name) + 1;
-            filename = (char *)malloc(len * sizeof(char));
+            filename = watcher_get_filename(watcher);
             if (!filename) {
-                ERR("Memory allocate\n");
+                _ERR("Memory allocate\n");
+                watcher_destroy(watcher);
                 return -1;
             }
-            memset(filename, 0, len);
-
-            str = strcat(filename, name);
-            str = strcat(str, event->name);
 
             arg = filename;
         }
@@ -287,14 +322,17 @@ main (int argc, char **argv)
                 str = strcat(str, "http://");
             }
             str = strcat(str, web);
+        } else {
+            str = strcat(str, "file://");
         }
 
+#ifdef HAVE_SUFFIX
         if (suffix) {
             regex_t preg;
             regmatch_t pmatch[1];
             char *regex = (char *)malloc((strlen(suffix) + 4) * sizeof(char));
             if (!regex) {
-                ERR("Memory allocate\n");
+                _ERR("Memory allocate\n");
                 return -1;
             }
 
@@ -315,10 +353,13 @@ main (int argc, char **argv)
         } else {
             str = strcat(str, arg);
         }
+#else
+        str = strcat(str, arg);
+#endif
 
         json = json_object();
         if (!json) {
-            ERR("Creating json object failed\n");
+            _ERR("Creating json object failed\n");
             break;
         }
 
@@ -328,7 +369,7 @@ main (int argc, char **argv)
         msg = json_dumps(json, json_flags);
         json_delete(json);
 
-        DEBUG(1, "Send Message=[%s]\n", msg);
+        _debug(1, "Send Message=[%s]\n", msg);
 
         memset(&info, 0, sizeof info);
 
@@ -345,14 +386,15 @@ main (int argc, char **argv)
 
         context = libwebsocket_create_context(&info);
         if (context == NULL) {
-            ERR("Creating libwebsocket context failed\n");
+            _ERR("Creating libwebsocket context failed\n");
         } else {
             host = address;
 
             wsi = libwebsocket_client_connect(context, address, port, use_ssl,
-                                              "/", host, origin, NULL, -1);
+                                              "/", host, origin,
+                                              "livereload", -1);
             if (wsi == NULL) {
-                ERR("libwebsocket dumb connect failed\n");
+                _ERR("libwebsocket dumb connect failed\n");
             } else if (msg) {
                 libwebsocket_service(context, 30);
                 libwebsocket_write(wsi, msg, strlen(msg), LWS_WRITE_TEXT);
@@ -371,12 +413,13 @@ main (int argc, char **argv)
         }
     } while (!interrupted);
 
-#if HAVE_INOTIFYTOOLS
-    if (watch && inotify) {
-        inotifytools_cleanup();
-        DEBUG(1, "\nFinished\n");
+#ifdef HAVE_WATCH
+    if (watch) {
+        watcher_destroy(watcher);
     }
 #endif
+
+    _debug(1, "\nFinished\n");
 
     return 0;
 }

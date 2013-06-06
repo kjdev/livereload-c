@@ -1,20 +1,26 @@
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <limits.h>
+
+#ifndef WIN32
 #include <unistd.h>
 #include <libgen.h>
 #include <getopt.h>
-#include <string.h>
-#include <sys/stat.h>
+#else
+#include "win32/getopt.h"
+#include "win32/string.h"
+#endif
 
-#define _GNU_SOURCE
-#include <fnmatch.h>
-
-#define BUFFER_SIZE 4096
-#define DEFAULT_MATCH "*</head>*"
+#define DEFAULT_MATCH "</head>"
 
 static int
 _stdin(void) {
+#ifndef WIN32
     struct stat st;
 
     if (fstat(STDIN_FILENO, &st) == 0 &&
@@ -23,12 +29,19 @@ _stdin(void) {
     }
 
     return 0;
+#else
+    return 1;
+#endif
 }
 
 static void
 usage(char *arg, char *message)
 {
+#ifndef WIN32
     char *command = basename(arg);
+#else
+    char *command = arg;
+#endif
 
     printf("Usage: %s [-m MATCH] URL\n\n", command);
 
@@ -44,10 +57,11 @@ usage(char *arg, char *message)
 int
 main(int argc, char **argv)
 {
-    char buf[BUFFER_SIZE];
+    char buf[BUFSIZ];
     char *match = DEFAULT_MATCH;
     char *url = NULL;
     int quiet = 0;
+    size_t len;
 
     int opt;
     const struct option long_options[] = {
@@ -88,16 +102,34 @@ main(int argc, char **argv)
     }
 
     while (1) {
-        memset(buf, 0, BUFFER_SIZE);
-        if (fgets(buf, BUFFER_SIZE, stdin) == NULL) {
+        int eot = 0;
+        char *out = NULL, *str = NULL;
+
+        memset(buf, 0, sizeof(char) * BUFSIZ);
+        out = buf;
+
+        len = fread(buf, sizeof(char), BUFSIZ, stdin);
+        if (len == 0) {
             break;
         }
 
-        if (fnmatch(match, buf, FNM_FILE_NAME | FNM_CASEFOLD) == 0) {
+        if (len < BUFSIZ) {
+            eot = 1;
+        }
+
+        str = strcasestr(buf, match);
+        if (str != NULL) {
+            printf("%.*s", str - buf, buf);
             printf("<script type=\"text/javascript\" src=\"%s\"></script>\n",
                    url);
+            out = str;
+            len -= str - buf;
         }
-        printf("%s", buf);
+        printf("%.*s", len, out);
+
+        if (eot) {
+            break;
+        }
     }
 
     return 0;

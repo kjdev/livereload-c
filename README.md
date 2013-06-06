@@ -53,6 +53,39 @@ default bind port is 35729.
 % livereload-server [-p 35729]
 ```
 
+simple httpd server and livereload.js filter.
+
+```
+% livereload-server -R /path/to/resource -s ./livereload.js
+```
+
+/path/to/resource/index.html:
+
+```
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<title>TEST</title>
+</head>
+<body>
+Hello, World.
+</body>
+</html>
+```
+
+show `http://localhost:35729` in the browser
+
+```
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<title>Index</title>
+<script type="text/javascript" src="/livereload.js"></script>
+</head>
+```
+
+`livereload.js` script in front of `</head>` is output.
+
 the other option confirm `--help`.
 
 ### Client
